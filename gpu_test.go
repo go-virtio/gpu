@@ -74,9 +74,20 @@ type fakeGPUDevice struct {
 	failAfter       int    // >0: fail the command at this 0-based index onward
 	cmdSeen         int    // number of commands processed (for failAfter)
 	ctrlConsumed    uint16 // used-ring bookkeeping for controlq
+	rejectVirgl     bool   // model a host without virglrenderer (no VIRGL)
+	completesUntil  int    // >0: stop completing once cmdSeen reaches this count
 
 	heldPages [][]byte
 	allocFail bool
+
+	// submitVirgl captures the virgl command-buffer bytes seen in the
+	// middle descriptor of the most recent SUBMIT_3D 3-descriptor chain.
+	submitVirgl []byte
+
+	// afterCmd, if set, is invoked (with d.mu held) after each command
+	// completes, receiving the 1-based count of commands processed so
+	// far. Tests use it to perturb queue state mid-sequence.
+	afterCmd func(seen int)
 }
 
 func newFakeGPUDevice(deviceFeats uint64, numScanouts uint32) *fakeGPUDevice {
@@ -224,6 +235,12 @@ func (d *fakeGPUDevice) Write8(bar uint8, off uint64, v uint8) error {
 			if d.clearFeaturesOK || d.driverFeatures&common.FeatureVersion1 == 0 {
 				v &^= common.StatusFeaturesOK
 			}
+			// rejectVirgl models a host without virglrenderer: if the
+			// driver tries to negotiate VIRGL (bit 0), FEATURES_OK does
+			// not latch.
+			if d.rejectVirgl && d.driverFeatures&FeatureVirgl != 0 {
+				v &^= common.StatusFeaturesOK
+			}
 		}
 		d.deviceStatus = v
 		return nil
@@ -318,6 +335,9 @@ func (d *fakeGPUDevice) handleCommand() {
 	if !d.completes {
 		return
 	}
+	if d.completesUntil > 0 && d.cmdSeen >= d.completesUntil {
+		return
+	}
 	const q = ControlQueueIdx
 	availAddr := d.qdriver[q]
 	usedAddr := d.qdevice[q]
@@ -358,6 +378,15 @@ func (d *fakeGPUDevice) handleCommand() {
 	reqType := le.Uint32(reqBuf[0:4])
 	respBuf := sliceAt(respDesc.addr, int(respDesc.length))
 
+	// SUBMIT_3D is a 3-descriptor chain: [0] submit struct, [1] virgl
+	// command buffer, [2] response. Capture the virgl bytes so tests can
+	// assert the encoded dwords.
+	if reqType == CmdSubmit3D && len(descs) == 3 {
+		vd := descs[1]
+		v := sliceAt(vd.addr, int(vd.length))
+		d.submitVirgl = append([]byte(nil), v...)
+	}
+
 	fail := d.forceError || (d.failAfter > 0 && d.cmdSeen >= d.failAfter)
 	d.cmdSeen++
 	d.writeResponse(respBuf, reqType, fail)
@@ -370,6 +399,10 @@ func (d *fakeGPUDevice) handleCommand() {
 	le.PutUint32(usedSlice[uo+4:uo+8], respDesc.length)
 	le.PutUint16(usedSlice[2:4], usedIdx+1)
 	d.ctrlConsumed++
+
+	if d.afterCmd != nil {
+		d.afterCmd(int(d.ctrlConsumed))
+	}
 }
 
 // writeResponse fills the response buffer for the given request type.

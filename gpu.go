@@ -4,12 +4,15 @@
 // a UEFI-backed device, a bare-metal device, or a virtio-mmio device
 // depending on which common.Transport implementation the caller supplies.
 //
-// Scope — 2D FRAMEBUFFER ONLY. The driver negotiates exactly
-// VIRTIO_F_VERSION_1 and deliberately does NOT negotiate VIRTIO_GPU_F_VIRGL
-// (bit 0), so the device operates in plain 2D mode (Virtio 1.1 §5.7).
-// 3D / virgl acceleration is out of scope: it requires a Mesa-class
-// GL/Vulkan stack to generate the OpenGL command streams the host
-// consumes, and no such stack exists in Go.
+// Scope — two paths. The 2D framebuffer path (OpenVirtioGPU) negotiates
+// exactly VIRTIO_F_VERSION_1 and drives the device in plain 2D mode
+// (Virtio 1.1 §5.7). The 3D path (OpenVirtioGPU3D + ClearScreen, in
+// gpu3d.go) additionally negotiates VIRTIO_GPU_F_VIRGL (bit 0) and
+// offloads a host-GPU scanout clear to virglrenderer via a hand-encoded
+// virgl command stream — still pure Go, CGO=0. What remains out of scope
+// is a FULL OpenGL/Vulkan implementation in Go (the Mesa-class GL→TGSI
+// stack needed to generate arbitrary command streams from an application
+// API); the 3D path hand-authors only the fixed command streams it needs.
 //
 // The driver owns device bring-up, the control virtqueue (controlq), the
 // cursor virtqueue (cursorq, set up but unused), and the on-the-wire
@@ -182,6 +185,18 @@ type VirtioGPU struct {
 //  7. DRIVER_OK status.
 //  8. Read num_scanouts (le32) from DeviceCfg offset 8.
 func OpenVirtioGPU(t common.Transport) (*VirtioGPU, error) {
+	return bringUp(t, AcceptedFeatures, ErrFeaturesNotOK)
+}
+
+// bringUp performs the device bring-up shared by the 2D and 3D
+// constructors. acceptMask is the feature mask to AND against the device
+// features and write back as the driver features (the 2D path passes
+// AcceptedFeatures = VERSION_1 only; the 3D path adds VIRGL). featuresErr
+// is the sentinel returned if FEATURES_OK does not latch — the 2D path
+// treats that as a generic ErrFeaturesNotOK, while the 3D path reads it as
+// "host lacks virglrenderer" (ErrVirglUnavailable). Every other step is
+// identical to the original inline OpenVirtioGPU bring-up.
+func bringUp(t common.Transport, acceptMask uint64, featuresErr error) (*VirtioGPU, error) {
 	did, err := t.ReadConfig16(common.PCICfgDeviceID)
 	if err != nil {
 		return nil, err
@@ -215,7 +230,7 @@ func OpenVirtioGPU(t common.Transport) (*VirtioGPU, error) {
 	if deviceFeats&common.FeatureVersion1 == 0 {
 		return nil, ErrNotModernDevice
 	}
-	negotiated := deviceFeats & AcceptedFeatures
+	negotiated := deviceFeats & acceptMask
 	if err := cfg.SetDriverFeatures64(negotiated); err != nil {
 		return nil, err
 	}
@@ -228,7 +243,7 @@ func OpenVirtioGPU(t common.Transport) (*VirtioGPU, error) {
 		return nil, err
 	}
 	if status&common.StatusFeaturesOK == 0 {
-		return nil, ErrFeaturesNotOK
+		return nil, featuresErr
 	}
 
 	controlq, err := setupQueue(cfg, t, ControlQueueIdx, ControlQueueSize)
