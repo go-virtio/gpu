@@ -46,8 +46,8 @@ func TestVirgl3DConstants(t *testing.T) {
 }
 
 func TestVirglCmd0(t *testing.T) {
-	if got := virglCmd0(virglCmdCreateObject, virglObjectSurface, 5); got != 0x00050701 {
-		t.Errorf("CREATE_OBJECT(SURFACE): got 0x%08x, want 0x00050701", got)
+	if got := virglCmd0(virglCmdCreateObject, virglObjectSurface, 5); got != 0x00050801 {
+		t.Errorf("CREATE_OBJECT(SURFACE): got 0x%08x, want 0x00050801", got)
 	}
 	if got := virglCmd0(virglCmdSetFramebufferState, 0, 3); got != 0x00030005 {
 		t.Errorf("SET_FRAMEBUFFER_STATE: got 0x%08x, want 0x00030005", got)
@@ -141,7 +141,7 @@ func TestClearScreen_Success(t *testing.T) {
 		dw[i] = binary.LittleEndian.Uint32(d.submitVirgl[i*4 : i*4+4])
 	}
 	expect := []uint32{
-		0x00050701, 1, 1, 1, 0, 0, // CREATE_OBJECT(SURFACE)
+		0x00050801, 1, 1, 1, 0, 0, // CREATE_OBJECT(SURFACE)
 		0x00030005, 1, 0, 1, // SET_FRAMEBUFFER_STATE
 		0x00080007, 4, // CLEAR header + buffers
 		math.Float32bits(0.25), math.Float32bits(0.5),

@@ -83,9 +83,11 @@ const (
 	virglCmdSetFramebufferState uint32 = 5
 	// VIRGL_CCMD_CLEAR.
 	virglCmdClear uint32 = 7
-	// VIRGL_OBJECT_SURFACE — the object kind created by the first
-	// CREATE_OBJECT command.
-	virglObjectSurface uint32 = 7
+	// VIRGL_OBJECT_SURFACE = 8. The enum is NULL=0, BLEND, RASTERIZER,
+	// DSA, SHADER, VERTEX_ELEMENTS, SAMPLER_VIEW, SAMPLER_STATE=7,
+	// SURFACE=8 — confirmed verbatim against virglrenderer
+	// src/virgl_protocol.h (the easy-to-miss SAMPLER_STATE slot sits at 7).
+	virglObjectSurface uint32 = 8
 	// PIPE_CLEAR_COLOR0 — clear the first colour buffer.
 	pipeClearColor0 uint32 = 4
 	// surfaceHandle is the virgl object handle assigned to the surface
