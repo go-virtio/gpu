@@ -46,7 +46,7 @@ func TestDrawConstants(t *testing.T) {
 		{"ccmdSetFramebufferState", ccmdSetFramebufferState, 5},
 		{"ccmdSetVertexBuffers", ccmdSetVertexBuffers, 6},
 		{"ccmdDrawVBO", ccmdDrawVBO, 8},
-		{"ccmdBindShader", ccmdBindShader, 32},
+		{"ccmdBindShader", ccmdBindShader, 31},
 		{"objectBlend", objectBlend, 1},
 		{"objectRasterizer", objectRasterizer, 2},
 		{"objectDSA", objectDSA, 3},

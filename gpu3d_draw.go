@@ -70,8 +70,12 @@ const (
 	ccmdSetVertexBuffers uint32 = 6
 	// VIRGL_CCMD_DRAW_VBO = 8.
 	ccmdDrawVBO uint32 = 8
-	// VIRGL_CCMD_BIND_SHADER = 32 (33rd entry, 0-based from NOP=0).
-	ccmdBindShader uint32 = 32
+	// VIRGL_CCMD_BIND_SHADER = 31. SET_TESS_STATE is 32 — confirmed by a
+	// live virglrenderer, which dispatched our (previously 32-encoded)
+	// BIND_SHADER as SET_TESS_STATE and rejected the buffer. The enum is
+	// …SET_SUB_CTX=28, CREATE_SUB_CTX=29, DESTROY_SUB_CTX=30,
+	// BIND_SHADER=31, SET_TESS_STATE=32.
+	ccmdBindShader uint32 = 31
 )
 
 // --- virgl object types (enum virgl_object_type, virgl_protocol.h) ----
