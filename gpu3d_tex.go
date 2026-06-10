@@ -204,13 +204,15 @@ const fsTexText = "FRAG\n" +
 // DrawTexturedTriangle renders one triangle textured from the host GPU to
 // scanout scanoutID.
 //
-// EXPERIMENTAL — NOT VALIDATED ON REAL HARDWARE. Like M2's DrawTriangle, every
-// command and TGSI shader below is hand-encoded against the Mesa virgl encoder
-// + virglrenderer sources and is exercised only by an in-process fake device;
-// it has NOT been run against a real virglrenderer/GPU. Treat a working
-// textured triangle as a hypothesis until validated on QEMU -device
-// virtio-gpu-gl (or equivalent). The shaders are shipped as TGSI *text*
-// (virglrenderer re-parses tgsi_dump_str output), not binary tokens.
+// EXPERIMENTAL — NOT YET VALIDATED ON REAL HARDWARE. The shared draw path
+// (shaders, BIND_SHADER, surface, rasterizer, DRAW_VBO) is the same one M2's
+// DrawTriangle validates against a real virglrenderer, so the BIND_SHADER=31
+// and SURFACE=8 fixes apply here too — but the texture-specific commands below
+// (SAMPLER_VIEW / SAMPLER_STATE creation, SET_SAMPLER_VIEWS, BIND_SAMPLER_STATES,
+// the texcoord varying) have NOT themselves been run against a real renderer.
+// Treat a working textured triangle as a hypothesis until validated on the vtest
+// harness. The shaders are shipped as TGSI *text* (virglrenderer re-parses
+// tgsi_dump_str output), not binary tokens.
 //
 // NEW INFERRED FIELDS in M3 (LOUD — byte-review these before publishing):
 //

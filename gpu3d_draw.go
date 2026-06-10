@@ -194,17 +194,17 @@ func ftoa(f float32) string {
 	return s
 }
 
-// EXPERIMENTAL — NOT VALIDATED ON REAL HARDWARE. Every command and TGSI
-// shader below is hand-encoded against the Mesa virgl encoder + virglrenderer
-// sources and is exercised only by an in-process fake device; it has NOT been
-// run against a real virglrenderer/GPU. Several field encodings are inferred
-// rather than confirmed from a known-good capture — in particular: the
-// per-shader num_tokens budget, the minimal rasterizer state bits, the
-// viewport depth half-range, the DRAW_VBO trailing fields, the PIPE_BUFFER
-// RESOURCE_CREATE_3D semantics, and the absence of capset negotiation. Treat a
-// working triangle as a hypothesis until validated on QEMU -device
-// virtio-gpu-gl (or equivalent). The shaders are shipped as TGSI *text*
-// (virglrenderer re-parses tgsi_dump_str output), not binary tokens.
+// VALIDATED against a real virglrenderer (software llvmpipe, via the
+// go-virtio/validate vtest harness on a Debian guest): the full command stream
+// is accepted and rasterizes a triangle — a non-uniform framebuffer readback
+// (corners the background, centre a triangle fragment), with no renderer error.
+// This validation is what caught the VIRGL_CCMD_BIND_SHADER encoding bug (was
+// 32 = SET_TESS_STATE; the live renderer rejected the draw with "Illegal
+// command buffer"; fixed to 31 in v0.5.1) and exercised the VIRGL_OBJECT_SURFACE
+// = 8 fix. NOT yet pixel-asserted for exact geometry/colour — a working triangle
+// is confirmed, a *correct* one is not formally checked. The shaders are shipped
+// as TGSI *text* (virglrenderer re-parses tgsi_dump_str output), not binary
+// tokens.
 //
 // DrawTriangle renders one flat-shaded triangle to scanout scanoutID using
 // the host GPU. verts is 3 clip-space vertices laid out x0,y0,z0, x1,y1,z1,
