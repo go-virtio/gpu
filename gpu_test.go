@@ -806,6 +806,10 @@ type injectTransport struct {
 	zeroPhys      bool
 	zeroPhysAfter int
 	allocCalls    int
+	// onAlloc, if set, is invoked after each armed AllocatePages with the
+	// 1-based armed-alloc index and the returned memory slice. Tests use it
+	// to inspect a specific backing page (e.g. the M3 texture texels).
+	onAlloc func(n int, mem []byte)
 }
 
 func newInject(d *fakeGPUDevice, enable bool) *injectTransport {
@@ -883,6 +887,9 @@ func (t *injectTransport) AllocatePages(c int) (uint64, []byte, error) {
 	// operation under test, not to the queue allocs done during Open.
 	if t.enable {
 		t.allocCalls++
+		if t.onAlloc != nil {
+			t.onAlloc(t.allocCalls, mem)
+		}
 		if t.zeroPhys && t.allocCalls > t.zeroPhysAfter {
 			return 0, mem, nil
 		}
