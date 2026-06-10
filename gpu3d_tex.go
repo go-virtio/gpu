@@ -185,6 +185,13 @@ const vsTexText = "VERT\n" +
 // TEX-samples the texture at the interpolated coordinate into OUT[0].
 //
 // Grammar confirmed against tgsi_text.c:
+//   - "DCL IN[0], GENERIC[0], PERSPECTIVE" : a fragment input MUST carry an
+//     interpolation token. tgsi_text.c's parse_declaration defaults an
+//     unqualified input to TGSI_INTERPOLATE_CONSTANT (flat), so "DCL IN[0],
+//     GENERIC[0]" makes the texcoord constant at the provoking vertex — real
+//     virglrenderer validation showed the whole triangle sampling a single
+//     texel. PERSPECTIVE gives perspective-correct interpolation across the
+//     primitive, which is what a texcoord varying needs.
 //   - "DCL SAMP[0]" : file=SAMP, no extra tokens (parse_declaration falls
 //     through for the SAMPLER file).
 //   - "DCL SVIEW[0], 2D, FLOAT" : file=SVIEW, then a texture-target name
@@ -194,7 +201,7 @@ const vsTexText = "VERT\n" +
 //     num_src=2, is_tex=1 (tgsi_info.c), so the operands are dst=OUT[0],
 //     src0=IN[0], src1=SAMP[0], then the texture target token "2D".
 const fsTexText = "FRAG\n" +
-	"DCL IN[0], GENERIC[0]\n" +
+	"DCL IN[0], GENERIC[0], PERSPECTIVE\n" +
 	"DCL OUT[0], COLOR\n" +
 	"DCL SAMP[0]\n" +
 	"DCL SVIEW[0], 2D, FLOAT\n" +
@@ -204,15 +211,19 @@ const fsTexText = "FRAG\n" +
 // DrawTexturedTriangle renders one triangle textured from the host GPU to
 // scanout scanoutID.
 //
-// EXPERIMENTAL — NOT YET VALIDATED ON REAL HARDWARE. The shared draw path
-// (shaders, BIND_SHADER, surface, rasterizer, DRAW_VBO) is the same one M2's
-// DrawTriangle validates against a real virglrenderer, so the BIND_SHADER=31
-// and SURFACE=8 fixes apply here too — but the texture-specific commands below
-// (SAMPLER_VIEW / SAMPLER_STATE creation, SET_SAMPLER_VIEWS, BIND_SAMPLER_STATES,
-// the texcoord varying) have NOT themselves been run against a real renderer.
-// Treat a working textured triangle as a hypothesis until validated on the vtest
-// harness. The shaders are shipped as TGSI *text* (virglrenderer re-parses
-// tgsi_dump_str output), not binary tokens.
+// VALIDATED against a real virglrenderer (software llvmpipe, via the
+// go-virtio/validate vtest harness): the full textured-triangle stream is
+// accepted and the texture is sampled and perspective-correctly interpolated
+// across the primitive — a 2×2 red/green/blue/white texture yields a smooth
+// multi-texel gradient in the framebuffer readback (24 distinct interior
+// colours), no renderer error. The texture-specific commands (SAMPLER_VIEW /
+// SAMPLER_STATE creation, SET_SAMPLER_VIEWS, BIND_SAMPLER_STATES) and the
+// texcoord varying are all confirmed. This validation caught a real shader bug:
+// the fragment texcoord input defaulted to CONSTANT (flat) interpolation until
+// declared PERSPECTIVE (see fsTexText) — until then the whole triangle sampled
+// a single texel. NOT yet pixel-asserted for exact texel placement. The shaders
+// are shipped as TGSI *text* (virglrenderer re-parses tgsi_dump_str output),
+// not binary tokens.
 //
 // NEW INFERRED FIELDS in M3 (LOUD — byte-review these before publishing):
 //
