@@ -209,26 +209,31 @@ func TestDrawTriangle_StepFailures(t *testing.T) {
 
 // --- alloc / zero-phys branches ---------------------------------------
 
-// allocSeq: during DrawTriangle the AllocatePages calls (while armed) are:
+// After the R-doom1c sendCommand-page cache fix, the only AllocatePages
+// calls during DrawTriangle (while armed) are:
 //
-//	#1 DisplayInfo (sendCommand page)
-//	#2 CTX_CREATE (sendCommand page)
-//	#3 RT RESOURCE_CREATE_3D (sendCommand page)
-//	#4 RT backing (attachBacking)
-//	#5 RT ATTACH_BACKING (sendCommand page)
-//	#6 RT CTX_ATTACH (sendCommand page)
-//	#7 VBUF RESOURCE_CREATE_3D (sendCommand page)
-//	#8 VBUF backing page (createVertexBuffer's own AllocatePages)
-//	#9 VBUF ATTACH_BACKING (sendCommand page)
-//	... etc.
+//	#1 ensureCmdPage (lazy alloc on the FIRST sendCommand — DisplayInfo)
+//	#2 RT backing page (attachBacking's own AllocatePages in gpu3d_draw.go)
+//	#3 VBUF backing page (createVertexBuffer's own AllocatePages)
+//	#4 SUBMIT_3D page (submit3D's own AllocatePages — not a sendCommand)
 //
-// Each sendCommand allocates one page; attachBacking and the vertex-buffer
-// backing allocate their own page too.
+// Every other DrawTriangle step issues its command via sendCommand, which
+// reuses the cached command page and allocates nothing.
+
+func TestDrawTriangle_EnsureCmdPageAllocFail(t *testing.T) {
+	_, g, it := openGPU3DInject(t)
+	it.enable = true
+	// First sendCommand (DisplayInfo) triggers ensureCmdPage's alloc.
+	it.fp = failPoint{"AllocatePages", 1}
+	if err := g.DrawTriangle(0, triVerts, triColor); err == nil {
+		t.Error("expected ensureCmdPage alloc error")
+	}
+}
 
 func TestDrawTriangle_RTBackingAllocFail(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
-	it.fp = failPoint{"AllocatePages", 4} // RT backing alloc fails
+	it.fp = failPoint{"AllocatePages", 2} // #1 ensureCmdPage, #2 RT backing fails
 	if err := g.DrawTriangle(0, triVerts, triColor); err == nil {
 		t.Error("expected RT backing alloc error")
 	}
@@ -238,7 +243,7 @@ func TestDrawTriangle_RTBackingZeroPhys(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 3 // #1..#3 real; RT backing (#4) returns zero phys
+	it.zeroPhysAfter = 1 // #1 ensureCmdPage real; RT backing (#2) returns zero phys
 	if err := g.DrawTriangle(0, triVerts, triColor); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}
@@ -247,9 +252,8 @@ func TestDrawTriangle_RTBackingZeroPhys(t *testing.T) {
 func TestDrawTriangle_VBufBackingAllocFail(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
-	// #1 DisplayInfo, #2 CTX, #3 RT create, #4 RT backing, #5 RT attach,
-	// #6 RT ctxattach, #7 VBUF create, #8 VBUF backing alloc fails.
-	it.fp = failPoint{"AllocatePages", 8}
+	// #1 ensureCmdPage, #2 RT backing, #3 VBUF backing alloc fails.
+	it.fp = failPoint{"AllocatePages", 3}
 	if err := g.DrawTriangle(0, triVerts, triColor); err == nil {
 		t.Error("expected vbuf backing alloc error")
 	}
@@ -259,7 +263,7 @@ func TestDrawTriangle_VBufBackingZeroPhys(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 7 // #1..#7 real; VBUF backing (#8) zero phys
+	it.zeroPhysAfter = 2 // #1..#2 real; VBUF backing (#3) zero phys
 	if err := g.DrawTriangle(0, triVerts, triColor); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}
@@ -268,11 +272,8 @@ func TestDrawTriangle_VBufBackingZeroPhys(t *testing.T) {
 func TestDrawTriangle_Submit3DAllocFail(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
-	// Allocs through the VBUF transfer: #1 DisplayInfo, #2 CTX, #3 RT create,
-	// #4 RT backing, #5 RT attach, #6 RT ctxattach, #7 VBUF create, #8 VBUF
-	// backing, #9 VBUF attach, #10 VBUF ctxattach, #11 VBUF transfer, #12
-	// SUBMIT_3D page alloc fails.
-	it.fp = failPoint{"AllocatePages", 12}
+	// #1 ensureCmdPage, #2 RT backing, #3 VBUF backing, #4 SUBMIT_3D fails.
+	it.fp = failPoint{"AllocatePages", 4}
 	if err := g.DrawTriangle(0, triVerts, triColor); err == nil {
 		t.Error("expected submit3D alloc error")
 	}
@@ -282,7 +283,7 @@ func TestDrawTriangle_Submit3DZeroPhys(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 11 // first 11 allocs real; SUBMIT_3D page (#12) zero
+	it.zeroPhysAfter = 3 // first 3 allocs real; SUBMIT_3D page (#4) zero
 	if err := g.DrawTriangle(0, triVerts, triColor); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}

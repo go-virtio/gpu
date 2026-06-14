@@ -218,31 +218,22 @@ func TestDrawTexturedTriangle_StepFailures(t *testing.T) {
 
 // --- alloc / zero-phys branches ---------------------------------------
 //
-// During DrawTexturedTriangle the AllocatePages calls (while armed) are:
+// After the R-doom1c sendCommand-page cache fix, the only AllocatePages
+// calls during DrawTexturedTriangle (while armed) are:
 //
-//	#1 DisplayInfo (sendCommand page)
-//	#2 CTX_CREATE (sendCommand page)
-//	#3 RT RESOURCE_CREATE_3D (sendCommand page)
-//	#4 RT backing (attachBacking)
-//	#5 RT ATTACH_BACKING (sendCommand page)
-//	#6 RT CTX_ATTACH (sendCommand page)
-//	#7 VBUF RESOURCE_CREATE_3D (sendCommand page)
-//	#8 VBUF backing page (createTexVertexBuffer's own AllocatePages)
-//	#9 VBUF ATTACH_BACKING (sendCommand page)
-//	#10 VBUF CTX_ATTACH (sendCommand page)
-//	#11 VBUF TRANSFER (sendCommand page)
-//	#12 TEX RESOURCE_CREATE_3D (sendCommand page)
-//	#13 TEX backing page (createTexture's own allocPagesFor)
-//	#14 TEX ATTACH_BACKING (sendCommand page)
-//	#15 TEX CTX_ATTACH (sendCommand page)
-//	#16 TEX TRANSFER (sendCommand page)
-//	#17 SUBMIT_3D page
-//	... etc.
+//	#1 ensureCmdPage (lazy alloc on the FIRST sendCommand — DisplayInfo)
+//	#2 RT backing page (attachBacking's own AllocatePages in gpu3d_draw.go)
+//	#3 VBUF backing page (createTexVertexBuffer's own AllocatePages)
+//	#4 TEX backing page (createTexture's own allocPagesFor)
+//	#5 SUBMIT_3D page (submit3D's own AllocatePages — not a sendCommand)
+//
+// Every other DrawTexturedTriangle step issues its command via sendCommand,
+// which reuses the cached command page and allocates nothing.
 
 func TestDrawTexturedTriangle_RTBackingAllocFail(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
-	it.fp = failPoint{"AllocatePages", 4} // RT backing alloc fails
+	it.fp = failPoint{"AllocatePages", 2} // #1 ensureCmdPage, #2 RT backing fails
 	if err := g.DrawTexturedTriangle(0, texTriVerts, texData2, texW2, texH2); err == nil {
 		t.Error("expected RT backing alloc error")
 	}
@@ -252,7 +243,7 @@ func TestDrawTexturedTriangle_RTBackingZeroPhys(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 3 // #1..#3 real; RT backing (#4) returns zero phys
+	it.zeroPhysAfter = 1 // #1 ensureCmdPage real; RT backing (#2) returns zero phys
 	if err := g.DrawTexturedTriangle(0, texTriVerts, texData2, texW2, texH2); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}
@@ -261,7 +252,7 @@ func TestDrawTexturedTriangle_RTBackingZeroPhys(t *testing.T) {
 func TestDrawTexturedTriangle_VBufBackingAllocFail(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
-	it.fp = failPoint{"AllocatePages", 8} // VBUF backing alloc fails
+	it.fp = failPoint{"AllocatePages", 3} // #1 ensureCmdPage, #2 RT backing, #3 VBUF backing fails
 	if err := g.DrawTexturedTriangle(0, texTriVerts, texData2, texW2, texH2); err == nil {
 		t.Error("expected vbuf backing alloc error")
 	}
@@ -271,7 +262,7 @@ func TestDrawTexturedTriangle_VBufBackingZeroPhys(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 7 // #1..#7 real; VBUF backing (#8) zero phys
+	it.zeroPhysAfter = 2 // #1..#2 real; VBUF backing (#3) zero phys
 	if err := g.DrawTexturedTriangle(0, texTriVerts, texData2, texW2, texH2); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}
@@ -280,7 +271,7 @@ func TestDrawTexturedTriangle_VBufBackingZeroPhys(t *testing.T) {
 func TestDrawTexturedTriangle_TexBackingAllocFail(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
-	it.fp = failPoint{"AllocatePages", 13} // TEX backing alloc fails
+	it.fp = failPoint{"AllocatePages", 4} // #1..#3 real; TEX backing (#4) fails
 	if err := g.DrawTexturedTriangle(0, texTriVerts, texData2, texW2, texH2); err == nil {
 		t.Error("expected tex backing alloc error")
 	}
@@ -290,7 +281,7 @@ func TestDrawTexturedTriangle_TexBackingZeroPhys(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 12 // #1..#12 real; TEX backing (#13) zero phys
+	it.zeroPhysAfter = 3 // #1..#3 real; TEX backing (#4) zero phys
 	if err := g.DrawTexturedTriangle(0, texTriVerts, texData2, texW2, texH2); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}
@@ -299,7 +290,7 @@ func TestDrawTexturedTriangle_TexBackingZeroPhys(t *testing.T) {
 func TestDrawTexturedTriangle_Submit3DAllocFail(t *testing.T) {
 	_, g, it := openGPU3DInject(t)
 	it.enable = true
-	it.fp = failPoint{"AllocatePages", 17} // SUBMIT_3D page alloc fails
+	it.fp = failPoint{"AllocatePages", 5} // SUBMIT_3D page (#5) alloc fails
 	if err := g.DrawTexturedTriangle(0, texTriVerts, texData2, texW2, texH2); err == nil {
 		t.Error("expected submit3D alloc error")
 	}
@@ -535,14 +526,16 @@ func TestBuildTexDrawVirglBuffer_Layout(t *testing.T) {
 // TestDrawTexturedTriangle_TexelUpload checks createTexture copies the caller's
 // RGBA8 bytes into the texture's guest backing verbatim. The fake records each
 // ATTACH_BACKING's mem_entry; here we instead verify via the inject harness
-// that the texture backing page (alloc #13) holds the texels after the call.
+// that the texture backing page (alloc #4 after the R-doom1c sendCommand-page
+// cache fix) holds the texels after the call.
 func TestDrawTexturedTriangle_TexelUpload(t *testing.T) {
 	d, g, it := openGPU3DInject(t)
 	it.enable = true
-	// Capture the 13th armed AllocatePages slice (the texture backing).
+	// Capture the 4th armed AllocatePages slice (the texture backing):
+	// #1 ensureCmdPage, #2 RT backing, #3 VBUF backing, #4 TEX backing.
 	var texBacking []byte
 	it.onAlloc = func(n int, mem []byte) {
-		if n == 13 {
+		if n == 4 {
 			texBacking = mem
 		}
 	}

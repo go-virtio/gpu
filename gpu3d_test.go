@@ -218,6 +218,46 @@ func TestClearScreen_StepFailures(t *testing.T) {
 
 // --- transport / alloc / timeout branches -----------------------------
 
+// After the R-doom1c sendCommand-page cache fix, the only AllocatePages
+// calls during ClearScreen (while armed) are:
+//
+//	#1 ensureCmdPage (lazy alloc on the FIRST sendCommand — DisplayInfo)
+//	#2 RT ATTACH_BACKING backing page (direct AllocatePages in gpu3d.go)
+//	#3 SUBMIT_3D page (submit3D's own AllocatePages — not a sendCommand)
+//
+// Every other ClearScreen step issues its command via sendCommand, which
+// reuses the cached command page and allocates nothing.
+
+func TestClearScreen_EnsureCmdPageAllocFail(t *testing.T) {
+	d := newFakeGPUDevice(common.FeatureVersion1|FeatureVirgl, 1)
+	it := newInject(d, false)
+	g, err := OpenVirtioGPU3D(it)
+	if err != nil {
+		t.Fatalf("OpenVirtioGPU3D: %v", err)
+	}
+	it.enable = true
+	// First sendCommand (DisplayInfo) triggers ensureCmdPage's alloc.
+	it.fp = failPoint{"AllocatePages", 1}
+	if err := g.ClearScreen(0, 64, 64, 0, 1); err == nil {
+		t.Error("expected ensureCmdPage alloc error")
+	}
+}
+
+func TestClearScreen_EnsureCmdPageZeroPhys(t *testing.T) {
+	d := newFakeGPUDevice(common.FeatureVersion1|FeatureVirgl, 1)
+	it := newInject(d, false)
+	g, err := OpenVirtioGPU3D(it)
+	if err != nil {
+		t.Fatalf("OpenVirtioGPU3D: %v", err)
+	}
+	it.enable = true
+	it.zeroPhys = true
+	it.zeroPhysAfter = 0 // first armed alloc (#1 ensureCmdPage) returns zero
+	if err := g.ClearScreen(0, 64, 64, 0, 1); !errors.Is(err, common.ErrAllocReturnedZero) {
+		t.Errorf("got %v, want ErrAllocReturnedZero", err)
+	}
+}
+
 func TestClearScreen_BackingAllocFail(t *testing.T) {
 	d := newFakeGPUDevice(common.FeatureVersion1|FeatureVirgl, 1)
 	it := newInject(d, false)
@@ -226,9 +266,8 @@ func TestClearScreen_BackingAllocFail(t *testing.T) {
 		t.Fatalf("OpenVirtioGPU3D: %v", err)
 	}
 	it.enable = true
-	// DisplayInfo alloc (#1), CTX_CREATE alloc (#2), RESOURCE_CREATE_3D
-	// alloc (#3), then ATTACH_BACKING alloc (#4) fails.
-	it.fp = failPoint{"AllocatePages", 4}
+	// #1 ensureCmdPage, then ATTACH_BACKING backing alloc (#2) fails.
+	it.fp = failPoint{"AllocatePages", 2}
 	if err := g.ClearScreen(0, 64, 64, 0, 1); err == nil {
 		t.Error("expected backing alloc error")
 	}
@@ -243,7 +282,7 @@ func TestClearScreen_BackingZeroPhys(t *testing.T) {
 	}
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 3 // DisplayInfo(#1), CTX_CREATE(#2), CREATE_3D(#3) real; backing(#4) zero
+	it.zeroPhysAfter = 1 // #1 ensureCmdPage real; backing(#2) zero
 	if err := g.ClearScreen(0, 64, 64, 0, 1); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}
@@ -257,10 +296,8 @@ func TestClearScreen_Submit3DAllocFail(t *testing.T) {
 		t.Fatalf("OpenVirtioGPU3D: %v", err)
 	}
 	it.enable = true
-	// DisplayInfo(#1), CTX_CREATE(#2), CREATE_3D(#3), ATTACH_BACKING
-	// backing(#4), ATTACH_BACKING cmd(#5), CTX_ATTACH(#6), SUBMIT_3D
-	// alloc(#7) fails.
-	it.fp = failPoint{"AllocatePages", 7}
+	// #1 ensureCmdPage, #2 RT backing, #3 SUBMIT_3D page alloc fails.
+	it.fp = failPoint{"AllocatePages", 3}
 	if err := g.ClearScreen(0, 64, 64, 0, 1); err == nil {
 		t.Error("expected submit3D alloc error")
 	}
@@ -275,7 +312,7 @@ func TestClearScreen_Submit3DZeroPhys(t *testing.T) {
 	}
 	it.enable = true
 	it.zeroPhys = true
-	it.zeroPhysAfter = 6 // first 6 allocs real; SUBMIT_3D alloc (#7) zero
+	it.zeroPhysAfter = 2 // #1 ensureCmdPage, #2 RT backing real; SUBMIT_3D (#3) zero
 	if err := g.ClearScreen(0, 64, 64, 0, 1); !errors.Is(err, common.ErrAllocReturnedZero) {
 		t.Errorf("got %v, want ErrAllocReturnedZero", err)
 	}
@@ -290,8 +327,10 @@ func TestClearScreen_Submit3DNotifyFail(t *testing.T) {
 	}
 	it.enable = true
 	// Doorbell writes go through Write32 (notify region 0x1000..0x2000).
-	// DisplayInfo(1), CTX_CREATE(2), CREATE_3D(3), ATTACH(4),
-	// CTX_ATTACH(5), SUBMIT_3D notify(6).
+	// ClearScreen issues one doorbell per control command (DisplayInfo,
+	// CTX_CREATE, CREATE_3D, ATTACH_BACKING, CTX_ATTACH, then SUBMIT_3D).
+	// The cache fix only removed AllocatePages calls; the per-command
+	// doorbells are unaffected. SUBMIT_3D's notify is the 6th doorbell.
 	it.fp = failPoint{"Write32", 6}
 	if err := g.ClearScreen(0, 64, 64, 0, 1); err == nil {
 		t.Error("expected submit3D notify error")

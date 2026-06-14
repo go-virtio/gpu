@@ -102,9 +102,9 @@ const displayOneSize = 24
 const maxScanouts = 16
 
 // requestOffset / responseOffset are the byte offsets within the single
-// command page where the request and response structs live. One
-// AllocatePages(1) per command serves both (phys+0 request, phys+2048
-// response).
+// driver-lifetime command page where the request and response structs
+// live. The page is lazily allocated once (see ensureCmdPage) and reused
+// for every sendCommand call (phys+0 request, phys+2048 response).
 const (
 	requestOffset  = 0
 	responseOffset = 2048
@@ -171,6 +171,19 @@ type VirtioGPU struct {
 	transport common.Transport
 	controlq  *common.Virtqueue
 	cursorq   *common.Virtqueue
+
+	// cmdPagePhys / cmdPageMem cache the single AllocatePages(1) backing
+	// the sendCommand request+response slot pair (request@0,
+	// response@2048). The page is lazily allocated by ensureCmdPage on the
+	// first sendCommand call and reused for every subsequent command. The
+	// synchronous send/poll/reclaim contract of sendCommand guarantees only
+	// one command is ever in flight, so a single shared page is safe —
+	// without it, every sendCommand call leaked one 4 KiB page on
+	// firmware-allocator backends (DOOM at 35 Hz × 2 Flush commands
+	// observed ~280 KiB/s of EfiBootServicesData growth, eventually
+	// starving the controlq and producing error responses).
+	cmdPagePhys uint64
+	cmdPageMem  []byte
 }
 
 // OpenVirtioGPU drives the full bring-up of one virtio-gpu device:
@@ -497,26 +510,62 @@ func putRect(dst []byte, x, y, width, height uint32) {
 	binary.LittleEndian.PutUint32(dst[12:16], height)
 }
 
+// ensureCmdPage lazily allocates the single command-page backing reused
+// by every sendCommand call (request@0, response@2048). It is safe to
+// call on every sendCommand — the alloc happens exactly once over the
+// lifetime of the VirtioGPU, and the cached page is reused thereafter.
+//
+// Centralising the alloc here keeps sendCommand's per-call cost to a
+// memcpy of the request bytes (instead of one AllocatePages per call).
+// On firmware-allocator backends (UEFI's gBS->AllocatePages) the previous
+// per-call alloc was a pure leak: AllocatePages is one-way without an
+// explicit FreePages, and sendCommand has no point at which it knows the
+// device is done reading the descriptor memory beyond the synchronous
+// poll loop's reclaim. Caching the page also makes it a documented part
+// of the driver's lifetime memory budget (one 4 KiB page total).
+func (g *VirtioGPU) ensureCmdPage() error {
+	if g.cmdPageMem != nil {
+		return nil
+	}
+	phys, mem, err := g.transport.AllocatePages(1)
+	if err != nil {
+		return err
+	}
+	if phys == 0 {
+		return common.ErrAllocReturnedZero
+	}
+	g.cmdPagePhys = phys
+	g.cmdPageMem = mem
+	return nil
+}
+
 // sendCommand sends one control command over controlq as a 2-descriptor
 // chain — request (read-only) + response (device-writable) — rings the
 // doorbell, busy-polls for completion, checks the response hdr.type, and
 // returns a copy of the response bytes on success.
 //
-// The request and response share one allocated page (request at offset 0,
-// response at offset 2048); the driver holds the page []byte so it reads
-// the response directly without unsafe.
+// The request and response share a single driver-lifetime command page
+// (request at offset 0, response at offset 2048) — see ensureCmdPage.
+// The synchronous send/poll/reclaim contract here guarantees only one
+// command is ever in flight, so the shared page is safe.
+//
+// The response slot is zeroed on every call: a stale OK_NODATA from a
+// prior command must not be mistaken for a fresh OK on a command the
+// device never wrote a response to (e.g., a path that returns early
+// before the device updates the response descriptor).
 func (g *VirtioGPU) sendCommand(req []byte) ([]byte, error) {
-	phys, mem, err := g.transport.AllocatePages(1)
-	if err != nil {
+	if err := g.ensureCmdPage(); err != nil {
 		return nil, err
 	}
-	if phys == 0 {
-		return nil, common.ErrAllocReturnedZero
-	}
+	mem := g.cmdPageMem
 	copy(mem[requestOffset:], req)
+	respBuf := mem[responseOffset:]
+	for i := range respBuf {
+		respBuf[i] = 0
+	}
 
-	reqPhys := phys + requestOffset
-	respPhys := phys + responseOffset
+	reqPhys := g.cmdPagePhys + requestOffset
+	respPhys := g.cmdPagePhys + responseOffset
 	chain := []common.ChainBuffer{
 		{Addr: uintptr(reqPhys), Phys: reqPhys, Len: uint32(len(req)), Writable: false},
 		{Addr: uintptr(respPhys), Phys: respPhys, Len: responseOffset, Writable: true},
@@ -530,7 +579,6 @@ func (g *VirtioGPU) sendCommand(req []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	respBuf := mem[responseOffset:]
 	for spin := 0; spin < CommandPollIterations; spin++ {
 		_, _, ok := g.controlq.PollUsed()
 		if !ok {
