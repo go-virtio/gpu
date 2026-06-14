@@ -88,6 +88,13 @@ type fakeGPUDevice struct {
 	// completes, receiving the 1-based count of commands processed so
 	// far. Tests use it to perturb queue state mid-sequence.
 	afterCmd func(seen int)
+
+	// injectStaleBefore, if >0, makes handleCommand post `injectStaleBefore`
+	// phantom used-ring entries with descIdx=65535 (an unreachable slot id
+	// for any real chain) BEFORE writing the real response. Used by
+	// R-doom1f regression tests to exercise sendCommand's late-stale-entry
+	// drain + in-loop descIdx mismatch skip. Self-decrements after each fire.
+	injectStaleBefore int
 }
 
 func newFakeGPUDevice(deviceFeats uint64, numScanouts uint32) *fakeGPUDevice {
@@ -392,6 +399,20 @@ func (d *fakeGPUDevice) handleCommand() {
 	d.writeResponse(respBuf, reqType, fail)
 
 	usedSlice := sliceAt(usedAddr, 4+8*int(size))
+	// R-doom1f: optionally pre-post phantom used-ring entries before the
+	// real one so sendCommand's PollUsed sees them first. descIdx=65535 is
+	// guaranteed to never match a real driver-allocated chain head (the
+	// driver's controlq is sized 32 in tests, so any index >= size is
+	// unreachable).
+	for d.injectStaleBefore > 0 {
+		staleUsedIdx := le.Uint16(usedSlice[2:4])
+		staleSlot := staleUsedIdx % size
+		so := 4 + int(staleSlot)*8
+		le.PutUint32(usedSlice[so:so+4], 0xFFFF)
+		le.PutUint32(usedSlice[so+4:so+8], 0)
+		le.PutUint16(usedSlice[2:4], staleUsedIdx+1)
+		d.injectStaleBefore--
+	}
 	usedIdx := le.Uint16(usedSlice[2:4])
 	uslot := usedIdx % size
 	uo := 4 + int(uslot)*8
@@ -646,6 +667,71 @@ func TestDisplayInfo_AddChainFull(t *testing.T) {
 	}
 	if _, err := g.DisplayInfo(); err == nil {
 		t.Error("expected AddChain queue-full error")
+	}
+}
+
+// R-doom1f regression: a sendCommand call must skip stale used-ring
+// entries that PollUsed returns whose descIdx does NOT match our just-
+// allocated head. This exercises the in-loop continue at gpu.go's
+// `if descIdx != head { continue }`. We make the fake device post one
+// phantom used-ring entry with descIdx=65535 BEFORE the real response,
+// so the first PollUsed inside the poll loop sees the phantom (descIdx
+// != head, must continue) and the second sees the real response.
+func TestSendCommand_SkipsInLoopStaleEntry(t *testing.T) {
+	d := newFakeGPUDevice(common.FeatureVersion1, 1)
+	g, err := OpenVirtioGPU(d)
+	if err != nil {
+		t.Fatalf("OpenVirtioGPU: %v", err)
+	}
+	d.injectStaleBefore = 1
+	displays, err := g.DisplayInfo()
+	if err != nil {
+		t.Fatalf("DisplayInfo with stale entry: %v", err)
+	}
+	if len(displays) != maxScanouts || !displays[0].Enabled {
+		t.Fatalf("DisplayInfo result corrupted: %+v", displays[0])
+	}
+}
+
+// R-doom1f regression: a sendCommand call must drain any stale used-ring
+// entries left over from PRIOR sendCommand calls (the timeout path that
+// returned ErrRequestTimeout but whose response the device eventually
+// posted). This exercises the new pre-AddChain drain loop in gpu.go.
+//
+// Setup: run a successful DisplayInfo to advance lastSeenUsedIdx to 1.
+// Then manually inject a stale used-ring entry at slot 1 (descIdx=65535)
+// and bump used.idx to 2 — this simulates a previously timed-out
+// command's late completion. The next DisplayInfo must consume that
+// stale entry during drain, then complete normally.
+func TestSendCommand_DrainsPreExistingStaleEntry(t *testing.T) {
+	d := newFakeGPUDevice(common.FeatureVersion1, 1)
+	g, err := OpenVirtioGPU(d)
+	if err != nil {
+		t.Fatalf("OpenVirtioGPU: %v", err)
+	}
+	// Warm-up call: succeeds, advances driver's lastSeenUsedIdx to 1.
+	if _, err := g.DisplayInfo(); err != nil {
+		t.Fatalf("warm-up DisplayInfo: %v", err)
+	}
+	// Manually inject a stale used-ring entry, simulating a prior
+	// timed-out command whose response the device finally posted.
+	const q = ControlQueueIdx
+	usedAddr := d.qdevice[q]
+	size := d.qsize[q]
+	usedSlice := sliceAt(usedAddr, 4+8*int(size))
+	usedIdx := le.Uint16(usedSlice[2:4])
+	slot := usedIdx % size
+	o := 4 + int(slot)*8
+	le.PutUint32(usedSlice[o:o+4], 0xFFFF) // descIdx the driver never allocated
+	le.PutUint32(usedSlice[o+4:o+8], 0)
+	le.PutUint16(usedSlice[2:4], usedIdx+1)
+	// Now a fresh sendCommand must drain that stale and still succeed.
+	displays, err := g.DisplayInfo()
+	if err != nil {
+		t.Fatalf("DisplayInfo with pre-existing stale: %v", err)
+	}
+	if len(displays) != maxScanouts || !displays[0].Enabled {
+		t.Fatalf("DisplayInfo result corrupted: %+v", displays[0])
 	}
 }
 

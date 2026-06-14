@@ -553,6 +553,28 @@ func (g *VirtioGPU) ensureCmdPage() error {
 // prior command must not be mistaken for a fresh OK on a command the
 // device never wrote a response to (e.g., a path that returns early
 // before the device updates the response descriptor).
+//
+// R-doom1f (2026-06-14): two-pronged stale-used-ring defence against a
+// cascade we observed on virtio-sound bring-up. When sound init briefly
+// stalls the vcpu (QEMU emulates virtio-snd-pci stream config), an
+// in-flight gpu sendCommand can exceed [CommandPollIterations] and
+// return [ErrRequestTimeout] WITHOUT advancing [common.Virtqueue]'s
+// lastSeenUsedIdx. The device later posts the late response; the NEXT
+// sendCommand's PollUsed then picks up that stale entry first, sees
+// the (just-zeroed) respBuf, and returns [ErrGPUCommandFailed]. The
+// cascade persists for every subsequent command because each
+// sendCommand pre-consumes one used-ring slot ahead of its own.
+//
+// Defence in depth:
+//  1. BEFORE AddChain: drain any used-ring slots left by prior timeouts.
+//  2. INSIDE the poll loop: skip used-ring entries whose descIdx does
+//     not match our just-issued head. Such entries are necessarily
+//     stale (the synchronous one-in-flight contract guarantees the
+//     device is only ever working on `head`).
+//
+// The combined fix turns the 92 OK / 0 FAILED baseline (DOOM at
+// 640×400, no sound) into a stable 0 FAILED with virtio-sound attached
+// (validated by internal/livedoomboot empirical sweep).
 func (g *VirtioGPU) sendCommand(req []byte) ([]byte, error) {
 	if err := g.ensureCmdPage(); err != nil {
 		return nil, err
@@ -562,6 +584,17 @@ func (g *VirtioGPU) sendCommand(req []byte) ([]byte, error) {
 	respBuf := mem[responseOffset:]
 	for i := range respBuf {
 		respBuf[i] = 0
+	}
+
+	// (1) Drain stale used-ring entries left by a prior sendCommand that
+	// returned ErrRequestTimeout before the device finally posted its
+	// response. Bounded by the ring size — there cannot be more in-flight
+	// completions than queue slots.
+	for drain := 0; drain < int(ControlQueueSize); drain++ {
+		_, _, ok := g.controlq.PollUsed()
+		if !ok {
+			break
+		}
 	}
 
 	reqPhys := g.cmdPagePhys + requestOffset
@@ -580,8 +613,14 @@ func (g *VirtioGPU) sendCommand(req []byte) ([]byte, error) {
 	}
 
 	for spin := 0; spin < CommandPollIterations; spin++ {
-		_, _, ok := g.controlq.PollUsed()
+		descIdx, _, ok := g.controlq.PollUsed()
 		if !ok {
+			continue
+		}
+		// (2) A used entry whose descIdx ≠ head can only be a late
+		// completion from a prior timed-out command. Skip it and keep
+		// polling for the device's response to OUR head.
+		if descIdx != head {
 			continue
 		}
 		_ = g.controlq.ReclaimChain(head)
