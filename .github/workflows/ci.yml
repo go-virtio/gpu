@@ -1,0 +1,120 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Coverage floor. Both packages (root virtio-gpu driver + soft3d software
+  # rasterizer) achieve 100.0% of statements. The on-the-wire virtio-gpu
+  # control protocol and the virgl/Venus command codecs are unconditional
+  # code (explicit binary.LittleEndian, no arch-only branch), so the same
+  # figure holds on every target arch — including big-endian s390x.
+  COVER_MIN: "100.0"
+
+jobs:
+  # ---- Native runners --------------------------------------------------
+  native:
+    name: native ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: test (coverage)
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test -timeout 10m -cover ./... | tee cover.txt
+          # Enforce the coverage floor on every reported package.
+          while read -r pct; do
+            echo "coverage on ${{ matrix.arch }}: ${pct}% (floor ${COVER_MIN}%)"
+            awk -v p="$pct" -v m="$COVER_MIN" 'BEGIN { exit !(p+0 >= m+0) }' \
+              || { echo "coverage ${pct}% < ${COVER_MIN}%"; exit 1; }
+          done < <(grep -oE 'coverage: [0-9.]+%' cover.txt | grep -oE '[0-9.]+')
+
+  # ---- Emulated targets (QEMU via binfmt) ------------------------------
+  # virtio is LITTLE-ENDIAN on the wire: the virtio-gpu control header
+  # (type, flags, fence_id, ctx_id) and every command/config struct are LE
+  # regardless of host endianness. s390x is BIG-ENDIAN: it is the proof
+  # that the explicit binary.LittleEndian protocol codec — and the
+  # go-virtio/common virtqueue big-endian fix this package builds on —
+  # work on big-endian hardware. It MUST pass.
+  #
+  # These are pure-Go unit tests driven by an in-process mock transport
+  # (command serialization, virtio-gpu protocol structs, virgl/Venus
+  # encoders, soft3d rasterization). Nothing here needs a real GPU,
+  # virglrenderer, or a display, so the suite runs fully under qemu-user.
+  emulated:
+    name: emulated ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            image: debian:trixie
+            qemu_cpu: "rv64,v=true,vlen=128"
+          - arch: loong64
+            image: ghcr.io/loong64/debian:trixie
+            qemu_cpu: la464
+          - arch: ppc64le
+            image: debian:trixie
+            qemu_cpu: power9
+          - arch: s390x
+            image: debian:trixie
+            qemu_cpu: qemu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: register QEMU binfmt handlers
+        run: docker run --rm --privileged tonistiigi/binfmt --install all
+
+      - name: cross-compile per-package test binaries
+        run: |
+          set -euo pipefail
+          mkdir -p _tbin
+          for pkg in $(go list ./...); do
+            name=$(echo "$pkg" | tr '/.' '__')
+            GOOS=linux GOARCH=${{ matrix.arch }} CGO_ENABLED=0 \
+              go test -c -cover -o "_tbin/${name}.test" "$pkg"
+          done
+          ls -l _tbin
+
+      - name: run test binaries under QEMU (${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          fail=0
+          for bin in _tbin/*.test; do
+            [ -e "$bin" ] || continue
+            echo "::group::$bin"
+            out=$(docker run --rm --platform linux/${{ matrix.arch }} \
+              -e QEMU_CPU='${{ matrix.qemu_cpu }}' \
+              -v "$PWD/_tbin:/tbin:ro" \
+              ${{ matrix.image }} "/tbin/$(basename "$bin")" -test.v -test.timeout 10m 2>&1) || fail=1
+            echo "$out"
+            pct=$(echo "$out" | grep -oE 'coverage: [0-9.]+%' | grep -oE '[0-9.]+' | head -1)
+            if [ -n "${pct:-}" ]; then
+              echo "coverage on ${{ matrix.arch }} ($bin): ${pct}% (floor ${COVER_MIN}%)"
+              awk -v p="$pct" -v m="$COVER_MIN" 'BEGIN { exit !(p+0 >= m+0) }' \
+                || { echo "coverage ${pct}% < ${COVER_MIN}%"; fail=1; }
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail
