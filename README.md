@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-virtio/brand/main/social/go-virtio-gpu.png" alt="go-virtio/gpu" width="720"></p>
+
 # go-virtio/gpu
 
 Pure-Go virtio-gpu (2D framebuffer) driver targeting the
