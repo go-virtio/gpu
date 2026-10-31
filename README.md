@@ -66,6 +66,19 @@ explicit:
   [`venus`](https://github.com/go-virtio/venus) module, which reuses this
   package's blob/context-init primitives.
 
+- **WebGPU over virtio (`webgpu-batch`, experimental, unvalidated).** A
+  private context type, capset **30** (not assigned by the spec), carries
+  [go-gfx/webgpu](https://github.com/go-gfx/webgpu) Recorder streams to a
+  host that replays them on WebGPU. The `wgpubatch` subpackage holds the
+  capset blob and the framed SUBMIT_3D payload (encoder and fuzzed
+  decoder, shared by guest and host). `gpu` holds the guest calls:
+  `OpenVirtioGPUWebGPUBatch`, `WebGPUBatchCaps`,
+  `CreateWebGPUBatchContext` and `SubmitWebGPUBatch` (with fences and
+  ring indices). **No host implements it yet**, so it has been tested
+  only against the in-process fake device. The design, the capset-id
+  rationale and the security model are in
+  [docs/WEBGPU.md](docs/WEBGPU.md).
+
 ## Quick start
 
 ```go

@@ -184,6 +184,12 @@ type VirtioGPU struct {
 	// starving the controlq and producing error responses).
 	cmdPagePhys uint64
 	cmdPageMem  []byte
+
+	// batchPhys / batchMem cache the pages SubmitWebGPUBatch lays a
+	// SUBMIT_3D chain out in, grown on demand and reused (same leak
+	// reasoning as cmdPage).
+	batchPhys uint64
+	batchMem  []byte
 }
 
 // OpenVirtioGPU drives the full bring-up of one virtio-gpu device:
@@ -625,7 +631,8 @@ func (g *VirtioGPU) sendCommand(req []byte) ([]byte, error) {
 		}
 		_ = g.controlq.ReclaimChain(head)
 		respType := binary.LittleEndian.Uint32(respBuf[0:4])
-		if respType == respOKNoData || respType == respOKDisplayInfo {
+		if respType == respOKNoData || respType == respOKDisplayInfo ||
+			respType == RespOKCapsetInfo || respType == RespOKCapset {
 			out := make([]byte, len(respBuf))
 			copy(out, respBuf)
 			return out, nil

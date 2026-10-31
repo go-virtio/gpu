@@ -95,6 +95,22 @@ type fakeGPUDevice struct {
 	// R-doom1f regression tests to exercise sendCommand's late-stale-entry
 	// drain + in-loop descIdx mismatch skip. Self-decrements after each fire.
 	injectStaleBefore int
+
+	// capsets the device offers (GET_CAPSET_INFO by index, GET_CAPSET by
+	// id); numCapsets, when nonzero, overrides len(capsets) in the config.
+	capsets    []fakeCapset
+	numCapsets uint32
+	// noFenceEcho makes fenced responses omit FLAG_FENCE (a non-conforming
+	// host); badFenceID echoes a different fence_id.
+	noFenceEcho bool
+	badFenceID  bool
+	// respType, when nonzero, replaces the type of every OK response.
+	respType uint32
+}
+
+type fakeCapset struct {
+	id, maxVersion uint32
+	blob           []byte
 }
 
 func newFakeGPUDevice(deviceFeats uint64, numScanouts uint32) *fakeGPUDevice {
@@ -212,7 +228,10 @@ func (d *fakeGPUDevice) Read32(bar uint8, off uint64) (uint32, error) {
 		case uint64(cfgNumScanouts):
 			return d.numScanouts, nil
 		case uint64(cfgNumCapsets):
-			return 0, nil
+			if d.numCapsets != 0 {
+				return d.numCapsets, nil
+			}
+			return uint32(len(d.capsets)), nil
 		}
 	}
 	return uint32(d.bar[barKey(bar, off)] & 0xFFFFFFFF), nil
@@ -397,6 +416,22 @@ func (d *fakeGPUDevice) handleCommand() {
 	fail := d.forceError || (d.failAfter > 0 && d.cmdSeen >= d.failAfter)
 	d.cmdSeen++
 	d.writeResponse(respBuf, reqType, fail)
+	if !fail {
+		d.capsetResponse(reqBuf, respBuf, reqType)
+		if d.respType != 0 {
+			le.PutUint32(respBuf[0:4], d.respType)
+		}
+		// Spec :275-282: a fenced request's response carries FLAG_FENCE
+		// and the same fence_id.
+		if le.Uint32(reqBuf[4:8])&FlagFence != 0 && !d.noFenceEcho {
+			le.PutUint32(respBuf[4:8], FlagFence)
+			id := le.Uint64(reqBuf[8:16])
+			if d.badFenceID {
+				id++
+			}
+			le.PutUint64(respBuf[8:16], id)
+		}
+	}
 
 	usedSlice := sliceAt(usedAddr, 4+8*int(size))
 	// R-doom1f: optionally pre-post phantom used-ring entries before the
@@ -423,6 +458,34 @@ func (d *fakeGPUDevice) handleCommand() {
 
 	if d.afterCmd != nil {
 		d.afterCmd(int(d.ctrlConsumed))
+	}
+}
+
+// capsetResponse answers GET_CAPSET_INFO and GET_CAPSET from d.capsets
+// (an unknown index or id gets an error response).
+func (d *fakeGPUDevice) capsetResponse(req, resp []byte, reqType uint32) {
+	switch reqType {
+	case CmdGetCapsetInfo:
+		i := le.Uint32(req[ctrlHdrSize:])
+		if int(i) >= len(d.capsets) {
+			le.PutUint32(resp[0:4], respErrBase)
+			return
+		}
+		c := d.capsets[i]
+		le.PutUint32(resp[0:4], RespOKCapsetInfo)
+		le.PutUint32(resp[ctrlHdrSize:], c.id)
+		le.PutUint32(resp[ctrlHdrSize+4:], c.maxVersion)
+		le.PutUint32(resp[ctrlHdrSize+8:], uint32(len(c.blob)))
+	case CmdGetCapset:
+		id := le.Uint32(req[ctrlHdrSize:])
+		for _, c := range d.capsets {
+			if c.id == id {
+				le.PutUint32(resp[0:4], RespOKCapset)
+				copy(resp[ctrlHdrSize:], c.blob)
+				return
+			}
+		}
+		le.PutUint32(resp[0:4], respErrBase)
 	}
 }
 
