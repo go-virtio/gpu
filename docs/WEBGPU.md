@@ -1,9 +1,25 @@
 # virtio-gpu × WebGPU
 
-Status: **design draft, unvalidated.** No host implements either option
-yet (see "Where is the host?"). Nothing below has run against a real
-device. The guest-side framing in `wgpubatch/` is tested offline only,
-and offline self-consistency is not validation.
+Status (2026-11-01): **both options have a host**,
+[go-virtio/gpudev](https://github.com/go-virtio/gpudev). The guest code in
+this repository has been validated against it in two settings:
+
+- **In process.** The go-virtio/gpu driver drives the gpudev device model
+  over an emulated virtio-pci transport (`gpudev/pcisim`), with real
+  virtqueues in guest RAM.
+- **In a browser on a real GPU.** The same runs happen inside Chromium,
+  with gpudev presenting and replaying through go-gfx/webgpu:
+  - **2D:** the canvas texture, read back, equals the guest's
+    framebuffer;
+  - **webgpu-batch:** a guest compute pipeline built by descriptor
+    doubles a buffer on the GPU.
+
+  This has run on Apple Metal locally and on the macOS CI lane, where a
+  GPU adapter is required, and on SwiftShader on Linux.
+
+What is still **unvalidated** is listed under "Validation status" at the
+end. Neither option has run under a hypervisor or with the Linux
+`virtio_gpu` driver.
 
 This document covers two ways to connect go-virtio/gpu with
 [go-gfx/webgpu](https://github.com/go-gfx/webgpu):
@@ -31,9 +47,9 @@ virtio-gpu **device model** anywhere in the fleet:
 - `gh search repos` in go-wasmcontainers, openweft, go-desktop and
   wasmdesk found no VM or emulator with a virtio-gpu device.
 
-The host side of both options is therefore **new code**. The proposed
-home, which is pending a decision, is under "Proposed packaging" at the
-end.
+The host side of both options was therefore **new code**. It is now
+[go-virtio/gpudev](https://github.com/go-virtio/gpudev), created on
+2026-10-31 at the user's decision.
 
 ## Bibliography (opened, with file:line)
 
@@ -240,9 +256,18 @@ transport needs, **in go-gfx/webgpu** and not copied here:
    go-gfx/webgpu API by recording into this transport instead of JS.
    Without it, only hand-built streams reach the guest side.
 
-These belong to a go-gfx/webgpu PR series. The `wgpubatch` package in
-go-virtio treats STREAM words and CREATE descriptors as opaque until
-`wire` exists.
+All five are now in go-gfx/webgpu:
+
+1. `wire` (#7): `Decode`, `Remap`, `StreamVersion`;
+2. creation descriptors (#8): `EncodeDescriptor`, `DecodeDescriptor`,
+   `wire.RemapDescriptor`, with every reference in a header;
+3. `Device.Replay` and `ReplayID` (#9);
+4. the `copyTextureToTexture` opcode (#10), which brings
+   `StreamVersion` to 2;
+5. the remote device, `NewRemoteDevice` and `RemoteSink` (#11).
+
+The `wgpubatch` package still treats STREAM words and CREATE descriptors
+as opaque bytes. gpudev decodes them with go-gfx/webgpu.
 
 ## Option 2: 2D scanout on WebGPU
 
@@ -274,11 +299,12 @@ FLUSH copy is GPU-side and negligible. The reference to beat is QEMU's
 pixman path (`:580-595` plus a console update) on the same machine. It
 will be measured once a host exists.
 
-The `RESOURCE_FLUSH` copy needs `copyTextureToTexture` in a batch. The
-Recorder has no such opcode today (`record.go:20-44`), so the flush uses
-the direct `CommandEncoder` path: a handful of JS calls per frame. That
-is acceptable at display rates. A Recorder opcode is a possible
-go-gfx/webgpu addition.
+As built (gpudev `webgpuback`), the flush uses the direct
+`CommandEncoder.CopyTextureToTexture`: a handful of JS calls per frame,
+which is acceptable at display rates. The Recorder has had the opcode
+since go-gfx/webgpu#10. A canvas texture starts cleared every frame, so
+the flush copies the whole shown rectangle and not only the damaged one.
+That is still one GPU copy, with no CPU work.
 
 ### Consumers
 
@@ -286,22 +312,26 @@ go-gfx/webgpu addition.
   That includes the go-virtio/gpu `SetupFramebuffer`/`Flush` path, the
   tamago backends of go-doom and go-quake1, and the Linux `virtio_gpu`
   KMS driver. On the host side, the consumer is a browser-hosted VM or
-  emulator. **None exists in the fleet yet.**
+  emulator. The fleet has none yet, so gpudev's `pcisim` is the
+  in-process stand-in.
 - **Option 4**: guest programs that want GPU compute or rendering
-  through the go-gfx/webgpu API (go-wasmcontainers/gpu workloads run in
-  a VM rather than in a page, and tamago games). It needs item 5 of the
-  export list above.
+  through the go-gfx/webgpu API, such as go-wasmcontainers/gpu workloads
+  running in a VM rather than in a page, and tamago games. They use the
+  go-gfx/webgpu remote device with a sink that sends frames through this
+  driver.
 
-## Proposed packaging (pending decision)
+## Packaging
 
 - `go-virtio/gpu/wgpubatch` (**this repository**): the capset id, the
   capset blob, and the frame encoder and decoder. Guest and host both
   import it, and it has no GOOS constraint.
-- **Host device model: a new repository**, for example
-  `go-virtio/gpudev`. It holds the virtio-gpu control queue and resource
-  table, the 2D commands, and a webgpu-batch context, with two backends:
-  go-gfx/webgpu (GOOS=js) and an in-memory backend for tests and fuzzing.
-  It is not created until the decision is made.
+- **[go-virtio/gpudev](https://github.com/go-virtio/gpudev)**, the host:
+  - the device model: the control queue, the 2D commands, the capset
+    queries and webgpu-batch contexts;
+  - `virtq`, the device side of the virtqueues;
+  - `pcisim`, an in-process virtio-pci transport;
+  - `memback`, an in-memory backend;
+  - `webgpuback`, the go-gfx/webgpu backend (GOOS=js).
 
 ## Guest API (this repository)
 
@@ -325,8 +355,13 @@ go-gfx/webgpu addition.
 
 | piece | status |
 |---|---|
-| `wgpubatch` encode/decode | offline unit tests (100%) and fuzzing (`FuzzDecode`, `FuzzDecodeCaps`) only |
-| capset query and response parsing | offline, fuzzed (`FuzzCapsetResponses`) |
-| CTX_CREATE / SUBMIT_3D with capset 30 | **unvalidated**: no host advertises it; tested against the in-process fake device only |
-| Option 2 host | not written |
-| Option 4 host | not written |
+| `wgpubatch` encode/decode | unit tests (100%) and fuzzing; decoded by the gpudev host in every run below |
+| capset query, CTX_CREATE, fenced and ringed SUBMIT_3D | **validated in-process** against gpudev (`e2e/TestGuestWebGPUBatch`) and **in a browser** |
+| 2D (`SetupFramebuffer`/`Flush`) on WebGPU | **validated in a browser on a real GPU**: the canvas texture equals the guest's pixels (`webgpuback/TestBrowser2D`; Apple Metal locally, macOS CI with a GPU required, Linux SwiftShader) |
+| webgpu-batch compute on WebGPU | **validated in a browser on a real GPU**: a pipeline built by descriptor doubles a buffer (`webgpuback/TestBrowserWebGPUBatch`) |
+| go-gfx/webgpu remote device → this driver → gpudev | validated in-process (`e2e/TestGuestRemoteDevice`, in-memory backend); not yet on a GPU, because the remote device is the non-browser build |
+| under a hypervisor, or with the Linux `virtio_gpu` driver | **unvalidated** |
+| `BIND_RESOURCE` readback on the WebGPU backend | not implemented (`ErrBind`); the device-side window is tested in-process |
+| transport v2 (shared ring) | designed, not implemented |
+| A8/X8-first 2D formats on WebGPU | need a swizzle pass, not implemented |
+| option-2 cost against QEMU | not measured |
