@@ -66,17 +66,24 @@ explicit:
   [`venus`](https://github.com/go-virtio/venus) module, which reuses this
   package's blob/context-init primitives.
 
-- **WebGPU over virtio (`webgpu-batch`, experimental, unvalidated).** A
-  private context type, capset **30** (not assigned by the spec), carries
+- **WebGPU over virtio (`webgpu-batch`, experimental).** A private
+  context type, capset **30** (not assigned by the spec), carries
   [go-gfx/webgpu](https://github.com/go-gfx/webgpu) Recorder streams to a
-  host that replays them on WebGPU. The `wgpubatch` subpackage holds the
-  capset blob and the framed SUBMIT_3D payload (encoder and fuzzed
-  decoder, shared by guest and host). `gpu` holds the guest calls:
-  `OpenVirtioGPUWebGPUBatch`, `WebGPUBatchCaps`,
-  `CreateWebGPUBatchContext` and `SubmitWebGPUBatch` (with fences and
-  ring indices). **No host implements it yet**, so it has been tested
-  only against the in-process fake device. The design, the capset-id
-  rationale and the security model are in
+  host that replays them on WebGPU.
+  - The `wgpubatch` subpackage holds the capset blob and the framed
+    SUBMIT_3D payload. Its encoder and fuzzed decoder are shared by guest
+    and host.
+  - `gpu` holds the guest calls: `OpenVirtioGPUWebGPUBatch`,
+    `WebGPUBatchCaps`, `CreateWebGPUBatchContext` and
+    `SubmitWebGPUBatch`, with fences and ring indices.
+
+  The host is [go-virtio/gpudev](https://github.com/go-virtio/gpudev).
+  This driver has been validated against it in process, and in a browser
+  on a real GPU (Apple Metal, and macOS CI with a GPU required): the 2D
+  framebuffer reaches the canvas texture pixel for pixel, and a guest
+  compute pipeline doubles a buffer on the GPU. It has **not** been run
+  under a hypervisor. The design, the capset-id rationale, the security
+  model and the full validation table are in
   [docs/WEBGPU.md](docs/WEBGPU.md).
 
 ## Quick start
