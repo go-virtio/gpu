@@ -319,6 +319,12 @@ func buildClearVirglBuffer(r, gr, b, a float32) []byte {
 // [2] response (device-writable). The three descriptors are laid out in a
 // single allocated page (submit@0, virgl@1024, response@2048).
 func (g *VirtioGPU) submit3D(vbuf []byte) error {
+	// The virgl bytes live in [1024, 2048): a longer buffer would overlap
+	// the device-writable response, or run past the page while its
+	// descriptor still claims len(vbuf) bytes.
+	if len(vbuf) > responseOffset-1024 {
+		return ErrVirglBufferTooLarge
+	}
 	phys, mem, err := g.transport.AllocatePages(1)
 	if err != nil {
 		return err
@@ -379,3 +385,7 @@ func (g *VirtioGPU) submit3D(vbuf []byte) error {
 // not latch after the VIRGL driver-feature write, or the negotiated mask
 // comes back without the VIRGL bit.
 var ErrVirglUnavailable = commonGPUError("go-virtio/gpu: host does not support VIRTIO_GPU_F_VIRGL (no virglrenderer)")
+
+// ErrVirglBufferTooLarge: a virgl command buffer above the 1024 bytes
+// submit3D's single page reserves for it.
+var ErrVirglBufferTooLarge = commonGPUError("go-virtio/gpu: virgl command buffer above 1024 bytes")
