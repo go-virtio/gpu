@@ -133,6 +133,25 @@ and version, so a host can tell a misrouted stream apart.
 The decoder refuses a short blob, a bad magic, version 0, a `max_frame`
 below one frame header, or `max_rings` above 64.
 
+### Capset blob, version 2: the adapter's features and limits
+
+A remote device has no adapter to ask, so version 2 (`wgpubatch.CapsVersion`,
+`max_size=64`) appends what the guest needs to choose kernel variants. A
+version 1 reader sees the first 40 bytes unchanged; a version 2 blob shorter
+than 64 bytes is refused. Frames stay at frame version 1.
+
+| off | field | meaning |
+|---|---|---|
+| 24 | `features` u32 | adds bit 1 `shader-f16`, bit 2 `subgroups`: set when the adapter has the feature and the host enabled it on the device. `timestamp-query` is never granted |
+| 40 | `max_storage_buffer_binding_size` u64 | `maxStorageBufferBindingSize` of the device |
+| 48 | `max_compute_workgroup_storage_size` u32 | bytes |
+| 52 | `max_compute_invocations_per_workgroup` u32 | |
+| 56 | `max_compute_workgroups_per_dimension` u32 | the bound a host enforces on `Dispatch` |
+| 60 | `max_storage_buffers_per_shader_stage` u32 | |
+
+Go: `Caps.Device` (`DeviceLimits`), `FeatureShaderF16`, `FeatureSubgroups`,
+`Caps.Size`. Zero in `Device` means "not reported" (a version 1 blob).
+
 ### Context creation
 
 `CTX_CREATE` with `context_init = 30` (the ring count is not part of

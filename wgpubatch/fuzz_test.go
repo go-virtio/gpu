@@ -93,16 +93,17 @@ func zeroPadding(b []byte, msgs []Message) []byte {
 }
 
 // FuzzDecodeCaps: any blob DecodeCaps accepts re-encodes to its first
-// CapsSize bytes, reserved word cleared.
+// Size bytes (CapsSize, or CapsSizeV2 from version 2), reserved word cleared.
 func FuzzDecodeCaps(f *testing.F) {
 	f.Add(testCaps().Encode())
+	f.Add(testCapsV2().Encode())
 	f.Add(make([]byte, CapsSize))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		c, err := DecodeCaps(b)
 		if err != nil {
 			return
 		}
-		want := bytes.Clone(b[:CapsSize])
+		want := bytes.Clone(b[:c.Size()])
 		clear(want[28:32])
 		if got := c.Encode(); !bytes.Equal(got, want) {
 			t.Fatalf("re-encode\n got %x\nwant %x", got, want)

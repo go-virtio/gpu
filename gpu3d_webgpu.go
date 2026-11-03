@@ -225,7 +225,7 @@ func (g *VirtioGPU) WebGPUBatchCaps() (wgpubatch.Caps, error) {
 		if info.ID != CapsetWebGPUBatch {
 			continue
 		}
-		resp, err = g.sendCommand(EncodeGetCapset(info.ID, min(info.MaxVersion, wgpubatch.Version)))
+		resp, err = g.sendCommand(EncodeGetCapset(info.ID, min(info.MaxVersion, wgpubatch.CapsVersion)))
 		if err != nil {
 			return wgpubatch.Caps{}, err
 		}
