@@ -42,9 +42,15 @@ const Version = 1
 // (description.tex:289, 0..63 inclusive).
 const MaxRings = 64
 
+// CapsVersion is the capset blob version this package encodes: 2 appended
+// the adapter's features and limits (Caps.Limits). Frames stay at Version.
+const CapsVersion = 2
+
 // Sizes on the wire, in bytes.
 const (
-	CapsSize          = 40
+	CapsSize   = 40 // capset version 1
+	CapsSizeV2 = 64 // capset version 2
+
 	FrameHeaderSize   = 16
 	MessageHeaderSize = 8
 )
@@ -61,6 +67,14 @@ const (
 // transport (v2, designed, not implemented).
 const FeatureRing uint32 = 1 << 0
 
+// Capset feature bits of the adapter's optional WebGPU features (version
+// 2): granted when the adapter has them and the host enables them on the
+// device. "timestamp-query" is never granted.
+const (
+	FeatureShaderF16 uint32 = 1 << 1 // "shader-f16"
+	FeatureSubgroups uint32 = 1 << 2 // "subgroups"
+)
+
 // ErrFrame is wrapped by every decoding error.
 var ErrFrame = errors.New("wgpubatch: malformed")
 
@@ -70,20 +84,48 @@ func malformed(format string, a ...any) error {
 
 var le = binary.LittleEndian
 
-// Caps is the capset blob (GET_CAPSET, capset CapsetID, version 1).
-type Caps struct {
-	Version       uint32 // protocol version, >= 1
-	StreamVersion uint32 // go-gfx/webgpu Recorder stream version replayed
-	MaxFrame      uint32 // largest SUBMIT_3D payload accepted, bytes
-	MaxObjects    uint32 // live guest objects per context; ids are 1..MaxObjects-1
-	MaxRings      uint32 // timelines per context, <= MaxRings
-	Features      uint32 // FeatureRing ...
-	MaxMemory     uint64 // buffer and texture bytes per context
+// DeviceLimits are the WebGPU limits of the device a host grants, from
+// capset version 2 on, so that a guest picks kernel variants without an
+// adapter to ask. Zero means "not reported" (a version 1 blob).
+type DeviceLimits struct {
+	MaxStorageBufferBindingSize       uint64
+	MaxComputeWorkgroupStorageSize    uint32
+	MaxComputeInvocationsPerWorkgroup uint32
+	MaxComputeWorkgroupsPerDimension  uint32
+	MaxStorageBuffersPerShaderStage   uint32
 }
 
-// Encode returns the CapsSize-byte blob.
+// Caps is the capset blob (GET_CAPSET, capset CapsetID, version 1 or 2).
+type Caps struct {
+	Version       uint32       // capset version, >= 1; Device and the adapter feature bits are carried from 2
+	StreamVersion uint32       // go-gfx/webgpu Recorder stream version replayed
+	MaxFrame      uint32       // largest SUBMIT_3D payload accepted, bytes
+	MaxObjects    uint32       // live guest objects per context; ids are 1..MaxObjects-1
+	MaxRings      uint32       // timelines per context, <= MaxRings
+	Features      uint32       // FeatureRing, FeatureShaderF16, FeatureSubgroups ...
+	MaxMemory     uint64       // buffer and texture bytes per context
+	Device        DeviceLimits // version 2
+}
+
+// Size is the length of the blob Encode returns: CapsSize for version 1,
+// CapsSizeV2 from version 2.
+func (c Caps) Size() int {
+	if c.Version >= 2 {
+		return CapsSizeV2
+	}
+	return CapsSize
+}
+
+// Encode returns the blob, Size bytes.
 func (c Caps) Encode() []byte {
-	b := make([]byte, CapsSize)
+	b := make([]byte, c.Size())
+	if c.Version >= 2 {
+		le.PutUint64(b[40:], c.Device.MaxStorageBufferBindingSize)
+		le.PutUint32(b[48:], c.Device.MaxComputeWorkgroupStorageSize)
+		le.PutUint32(b[52:], c.Device.MaxComputeInvocationsPerWorkgroup)
+		le.PutUint32(b[56:], c.Device.MaxComputeWorkgroupsPerDimension)
+		le.PutUint32(b[60:], c.Device.MaxStorageBuffersPerShaderStage)
+	}
 	le.PutUint32(b[0:], Magic)
 	le.PutUint32(b[4:], c.Version)
 	le.PutUint32(b[8:], c.StreamVersion)
@@ -112,6 +154,18 @@ func DecodeCaps(b []byte) (Caps, error) {
 		MaxRings:      le.Uint32(b[20:]),
 		Features:      le.Uint32(b[24:]),
 		MaxMemory:     le.Uint64(b[32:]),
+	}
+	if c.Version >= 2 {
+		if len(b) < CapsSizeV2 {
+			return Caps{}, malformed("capset version %d blob of %d bytes", c.Version, len(b))
+		}
+		c.Device = DeviceLimits{
+			MaxStorageBufferBindingSize:       le.Uint64(b[40:]),
+			MaxComputeWorkgroupStorageSize:    le.Uint32(b[48:]),
+			MaxComputeInvocationsPerWorkgroup: le.Uint32(b[52:]),
+			MaxComputeWorkgroupsPerDimension:  le.Uint32(b[56:]),
+			MaxStorageBuffersPerShaderStage:   le.Uint32(b[60:]),
+		}
 	}
 	switch {
 	case c.Version == 0:

@@ -44,6 +44,57 @@ func TestCapsRoundTrip(t *testing.T) {
 	}
 }
 
+func testCapsV2() Caps {
+	c := testCaps()
+	c.Version = 2
+	c.Features |= FeatureShaderF16 | FeatureSubgroups
+	c.Device = DeviceLimits{
+		MaxStorageBufferBindingSize: 128 << 20, MaxComputeWorkgroupStorageSize: 16384,
+		MaxComputeInvocationsPerWorkgroup: 256, MaxComputeWorkgroupsPerDimension: 65535, MaxStorageBuffersPerShaderStage: 8,
+	}
+	return c
+}
+
+// Version 2 appends the adapter's features and limits at fixed offsets; a
+// version 1 reader sees the first CapsSize bytes unchanged, and a version 2
+// blob cut short is refused.
+func TestCapsV2(t *testing.T) {
+	c := testCapsV2()
+	b := c.Encode()
+	if len(b) != CapsSizeV2 || c.Size() != CapsSizeV2 {
+		t.Fatalf("len %d", len(b))
+	}
+	tail := []byte{
+		0, 0, 0, 8, 0, 0, 0, 0, // max_storage_buffer_binding_size 128 MiB
+		0, 0x40, 0, 0, // max_compute_workgroup_storage_size 16384
+		0, 1, 0, 0, // max_compute_invocations_per_workgroup 256
+		0xff, 0xff, 0, 0, // max_compute_workgroups_per_dimension 65535
+		8, 0, 0, 0, // max_storage_buffers_per_shader_stage
+	}
+	if !bytes.Equal(b[CapsSize:], tail) {
+		t.Fatalf("tail\n got %x\nwant %x", b[CapsSize:], tail)
+	}
+	if b[24] != 7 {
+		t.Fatalf("features byte %d, want ring|f16|subgroups", b[24])
+	}
+	got, err := DecodeCaps(b)
+	if err != nil || got != c {
+		t.Fatalf("DecodeCaps = %+v, %v", got, err)
+	}
+	if _, err := DecodeCaps(b[:CapsSizeV2-1]); !errors.Is(err, ErrFrame) {
+		t.Errorf("short v2 blob: %v", err)
+	}
+	// A version 1 blob reports no limits.
+	v1, err := DecodeCaps(b[:CapsSize])
+	if err == nil && v1.Version == 2 {
+		t.Error("a v2 header in a v1-sized blob was accepted")
+	}
+	old := testCaps().Encode()
+	if g, err := DecodeCaps(old); err != nil || g.Device != (DeviceLimits{}) {
+		t.Errorf("v1: %+v %v", g, err)
+	}
+}
+
 func TestDecodeCapsRefuses(t *testing.T) {
 	mut := func(f func(*Caps)) []byte { c := testCaps(); f(&c); return c.Encode() }
 	badMagic := testCaps().Encode()
